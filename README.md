@@ -27,7 +27,7 @@ The S3 endpoint will be ran against http://endpoint1:80 and
 http://endpoint2:80. Object name will be prefixed with loadgen.
 
 ```
-./s3bench -accessKey=KEY -accessSecret=SECRET -bucket=loadgen -endpoint=http://endpoint1:80,http://endpoint2:80 -numClients=2 -numSamples=10 -objectNamePrefix=loadgen -objectSize=1024
+./s3bench -accessKey=KEY -accessSecret=SECRET -bucket=loadgen -endpoint=http://endpoint1:80,http://endpoint2:80 -numClients=2 -numSamples=10 -objectNamePrefix=loadgen -objectSize=1024 -csvOutput
 ```
 
 #### Note on regions & endpoints
