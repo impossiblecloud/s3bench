@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +30,7 @@ const (
 var bufferBytes []byte
 
 func main() {
+	csvOutput := flag.Bool("csvOutput", false, "enable output to CSV file")
 	endpoint := flag.String("endpoint", "", "S3 endpoint(s) comma separated - http://IP:PORT,http://IP:PORT")
 	region := flag.String("region", "igneous-test", "AWS region to use, eg: us-west-1|us-east-1, etc")
 	accessKey := flag.String("accessKey", "", "the S3 access key")
@@ -102,6 +105,15 @@ func main() {
 	fmt.Println(writeResult)
 	fmt.Println()
 	fmt.Println(readResult)
+
+	if *csvOutput {
+		err := outputToCSV([]Result{writeResult, readResult}, "output.csv")
+		if err != nil {
+			fmt.Printf("Error writing to CSV: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Results written to output.csv")
+	}
 
 	// Do cleanup if required
 	if !*skipCleanup {
@@ -294,6 +306,60 @@ func (r Result) percentile(i int) float64 {
 		i = int(float64(i) / 100 * float64(len(r.opDurations)))
 	}
 	return r.opDurations[i]
+}
+
+func outputToCSV(results []Result, filename string) error {
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	err = writer.Write([]string{
+		"Operation",
+		"Bytes Transmitted (MB)",
+		"Total Duration (s)",
+		"Throughput (MB/s)",
+		"Number of Errors",
+		"Max Time (s)",
+		"99th Percentile Time (s)",
+		"90th Percentile Time (s)",
+		"75th Percentile Time (s)",
+		"Median Time (s)",
+		"25th Percentile Time (s)",
+		"Min Time (s)",
+	})
+	if err != nil {
+		return err
+	}
+
+	// Write data
+	for _, result := range results {
+		record := []string{
+			result.operation,
+			fmt.Sprintf("%0.3f", float64(result.bytesTransmitted)/(1024*1024)),
+			fmt.Sprintf("%0.3f", result.totalDuration.Seconds()),
+			fmt.Sprintf("%0.2f", (float64(result.bytesTransmitted)/(1024*1024))/result.totalDuration.Seconds()),
+			strconv.Itoa(result.numErrors),
+			fmt.Sprintf("%0.3f", result.percentile(100)),
+			fmt.Sprintf("%0.3f", result.percentile(99)),
+			fmt.Sprintf("%0.3f", result.percentile(90)),
+			fmt.Sprintf("%0.3f", result.percentile(75)),
+			fmt.Sprintf("%0.3f", result.percentile(50)),
+			fmt.Sprintf("%0.3f", result.percentile(25)),
+			fmt.Sprintf("%0.3f", result.percentile(0)),
+		}
+		err = writer.Write(record)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 type Req interface{}
