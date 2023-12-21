@@ -282,6 +282,15 @@ func main() {
 
 	}
 
+	if *csvOutput {
+		err := outputToCSV([]Result{writeResult, readResult}, "output.csv")
+		if err != nil {
+			fmt.Printf("Error writing to CSV: %s\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Results written to output.csv")
+	}
+
 	if !*skipCleanup {
 		params.cleanup(svc)
 
