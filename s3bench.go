@@ -2,12 +2,12 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"os"
 	"sort"
 	"strconv"
@@ -42,6 +42,8 @@ func main() {
 	numSamples := flag.Int("numSamples", 200, "total number of requests to send")
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
+	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
+	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 
 	flag.Parse()
 
@@ -58,15 +60,17 @@ func main() {
 
 	// Setup and print summary of the accepted parameters
 	params := Params{
-		requests:         make(chan Req),
-		responses:        make(chan Resp),
-		numSamples:       *numSamples,
-		numClients:       uint(*numClients),
-		objectSize:       *objectSize,
-		objectNamePrefix: *objectNamePrefix,
-		bucketName:       *bucketName,
-		endpoints:        strings.Split(*endpoint, ","),
-		verbose:          *verbose,
+		requests:              make(chan Req),
+		responses:             make(chan Resp),
+		numSamples:            *numSamples,
+		numClients:            uint(*numClients),
+		objectSize:            *objectSize,
+		objectNamePrefix:      *objectNamePrefix,
+		bucketName:            *bucketName,
+		endpoints:             strings.Split(*endpoint, ","),
+		verbose:               *verbose,
+		putObjectRetention:    *putObjectRetention,
+		numPutObjectRetention: *numPutObjectRetention,
 	}
 	fmt.Println(params)
 	fmt.Println()
@@ -92,11 +96,15 @@ func main() {
 	params.StartClients(cfg)
 
 	fmt.Printf("Running %s test...\n", opWrite)
-	writeResult := params.Run(opWrite)
+	numSamplesWrite := params.numSamples
+	if params.putObjectRetention {
+		numSamplesWrite += params.numSamples * params.numPutObjectRetention
+	}
+	writeResult := params.Run(opWrite, numSamplesWrite)
 	fmt.Println()
 
 	fmt.Printf("Running %s test...\n", opRead)
-	readResult := params.Run(opRead)
+	readResult := params.Run(opRead, params.numSamples)
 	fmt.Println()
 
 	// Repeating the parameters of the test followed by the results
@@ -152,15 +160,15 @@ func main() {
 	}
 }
 
-func (params *Params) Run(op string) Result {
+func (params *Params) Run(op string, numSamples int) Result {
 	startTime := time.Now()
 
 	// Start submitting load requests
 	go params.submitLoad(op)
 
 	// Collect and aggregate stats for completed requests
-	result := Result{opDurations: make([]float64, 0, params.numSamples), operation: op}
-	for i := 0; i < params.numSamples; i++ {
+	result := Result{opDurations: make([]float64, 0, numSamples), operation: op}
+	for i := 0; i < numSamples; i++ {
 		resp := <-params.responses
 		errorString := ""
 		if resp.err != nil {
@@ -193,6 +201,23 @@ func (params *Params) submitLoad(op string) {
 				Bucket: bucket,
 				Key:    key,
 				Body:   bytes.NewReader(bufferBytes),
+			}
+			if params.putObjectRetention {
+				retention := &s3.ObjectLockRetention{
+					Mode: aws.String("GOVERNANCE"),
+					RetainUntilDate: aws.Time(
+						time.Now().AddDate(rand.Intn(10), rand.Intn(12), rand.Intn(30)),
+					),
+				}
+				for j := 0; j < params.numPutObjectRetention; j++ {
+					randomPreviousKey := aws.String(fmt.Sprintf("%s%d", params.objectNamePrefix, rand.Intn(i+1)))
+					params.requests <- &s3.PutObjectRetentionInput{
+						Bucket:                    bucket,
+						Key:                       randomPreviousKey,
+						Retention:                 retention,
+						BypassGovernanceRetention: aws.Bool(true),
+					}
+				}
 			}
 		} else if op == opRead {
 			params.requests <- &s3.GetObjectInput{
@@ -227,6 +252,9 @@ func (params *Params) startClient(cfg *aws.Config) {
 			// Disable payload checksum calculation (very expensive)
 			req.HTTPRequest.Header.Add("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
 			err = req.Send()
+		case *s3.PutObjectRetentionInput:
+			req, _ := svc.PutObjectRetentionRequest(r)
+			err = req.Send()
 		case *s3.GetObjectInput:
 			req, resp := svc.GetObjectRequest(r)
 			err = req.Send()
@@ -247,16 +275,18 @@ func (params *Params) startClient(cfg *aws.Config) {
 
 // Specifies the parameters for a given test
 type Params struct {
-	operation        string
-	requests         chan Req
-	responses        chan Resp
-	numSamples       int
-	numClients       uint
-	objectSize       int64
-	objectNamePrefix string
-	bucketName       string
-	endpoints        []string
-	verbose          bool
+	operation             string
+	requests              chan Req
+	responses             chan Resp
+	numSamples            int
+	numClients            uint
+	objectSize            int64
+	objectNamePrefix      string
+	bucketName            string
+	endpoints             []string
+	verbose               bool
+	putObjectRetention    bool
+	numPutObjectRetention int
 }
 
 func (params Params) String() string {
