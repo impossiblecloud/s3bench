@@ -44,6 +44,7 @@ func main() {
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
 	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
 	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
+	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
 
 	flag.Parse()
 
@@ -103,8 +104,13 @@ func main() {
 	writeResult := params.Run(opWrite, numSamplesWrite)
 	fmt.Println()
 
-	fmt.Printf("Running %s test...\n", opRead)
-	readResult := params.Run(opRead, params.numSamples)
+	var readResult Result
+	if *skipRead {
+		fmt.Printf("Running %s test skipped...\n", opRead)
+	} else {
+		fmt.Printf("Running %s test...\n", opRead)
+		readResult = params.Run(opRead, params.numSamples)
+	}
 	fmt.Println()
 
 	// Repeating the parameters of the test followed by the results
@@ -112,7 +118,11 @@ func main() {
 	fmt.Println()
 	fmt.Println(writeResult)
 	fmt.Println()
-	fmt.Println(readResult)
+	if *skipRead {
+		fmt.Println("Read test skipped...")
+	} else {
+		fmt.Println(readResult)
+	}
 
 	if *csvOutput {
 		err := outputToCSV([]Result{writeResult, readResult}, "output.csv")
