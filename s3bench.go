@@ -176,10 +176,18 @@ func (params *Params) Run(op string, numSamples int) Result {
 	// Start submitting load requests
 	go params.submitLoad(op)
 
+	excludeTime := time.Duration(0)
+
 	// Collect and aggregate stats for completed requests
 	result := Result{opDurations: make([]float64, 0, numSamples), operation: op}
 	for i := 0; i < numSamples; i++ {
 		resp := <-params.responses
+
+		if resp.excludeStatistic {
+			excludeTime += resp.duration
+			continue
+		}
+
 		errorString := ""
 		if resp.err != nil {
 			result.numErrors++
@@ -197,6 +205,8 @@ func (params *Params) Run(op string, numSamples int) Result {
 	}
 
 	result.totalDuration = time.Since(startTime)
+	// exclude retention time, it affects on throughput
+	result.totalDuration = result.totalDuration - excludeTime
 	sort.Float64s(result.opDurations)
 	return result
 }
@@ -256,6 +266,7 @@ func (params *Params) startClient(cfg *aws.Config) {
 		var err error
 		numBytes := params.objectSize
 
+		var excludeStatistic bool
 		switch r := request.(type) {
 		case *s3.PutObjectInput:
 			req, _ := svc.PutObjectRequest(r)
@@ -265,6 +276,7 @@ func (params *Params) startClient(cfg *aws.Config) {
 		case *s3.PutObjectRetentionInput:
 			req, _ := svc.PutObjectRetentionRequest(r)
 			err = req.Send()
+			excludeStatistic = true
 		case *s3.GetObjectInput:
 			req, resp := svc.GetObjectRequest(r)
 			err = req.Send()
@@ -279,7 +291,7 @@ func (params *Params) startClient(cfg *aws.Config) {
 			panic("Developer error")
 		}
 
-		params.responses <- Resp{err, time.Since(putStartTime), numBytes}
+		params.responses <- Resp{err, time.Since(putStartTime), numBytes, excludeStatistic}
 	}
 }
 
@@ -405,7 +417,8 @@ func outputToCSV(results []Result, filename string) error {
 type Req interface{}
 
 type Resp struct {
-	err      error
-	duration time.Duration
-	numBytes int64
+	err              error
+	duration         time.Duration
+	numBytes         int64
+	excludeStatistic bool
 }
