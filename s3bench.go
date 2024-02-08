@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"math/rand"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -45,6 +47,7 @@ func main() {
 	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
 	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
+	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
 
 	flag.Parse()
 
@@ -72,6 +75,7 @@ func main() {
 		verbose:               *verbose,
 		putObjectRetention:    *putObjectRetention,
 		numPutObjectRetention: *numPutObjectRetention,
+		tlsVerifyDisable:      *tlsVerifyDisable,
 	}
 	fmt.Println(params)
 	fmt.Println()
@@ -87,6 +91,10 @@ func main() {
 	}
 	fmt.Printf("Done (%s)\n", time.Since(timeGenData))
 	fmt.Println()
+
+	if *tlsVerifyDisable {
+		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
 
 	// Start the load clients and run a write test followed by a read test
 	cfg := &aws.Config{
@@ -309,6 +317,7 @@ type Params struct {
 	verbose               bool
 	putObjectRetention    bool
 	numPutObjectRetention int
+	tlsVerifyDisable      bool
 }
 
 func (params Params) String() string {
