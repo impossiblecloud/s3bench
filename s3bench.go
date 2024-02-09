@@ -48,6 +48,8 @@ func main() {
 	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
 	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
+	listObjects := flag.Bool("listObjects", false, "enable ListObjects requests for first page with default settings")
+	listObjectsAfterWrites := flag.Int("listObjectsAfterWrites", 10, "execute ListObjects after number object write requests")
 
 	flag.Parse()
 
@@ -64,18 +66,20 @@ func main() {
 
 	// Setup and print summary of the accepted parameters
 	params := Params{
-		requests:              make(chan Req),
-		responses:             make(chan Resp),
-		numSamples:            *numSamples,
-		numClients:            uint(*numClients),
-		objectSize:            *objectSize,
-		objectNamePrefix:      *objectNamePrefix,
-		bucketName:            *bucketName,
-		endpoints:             strings.Split(*endpoint, ","),
-		verbose:               *verbose,
-		putObjectRetention:    *putObjectRetention,
-		numPutObjectRetention: *numPutObjectRetention,
-		tlsVerifyDisable:      *tlsVerifyDisable,
+		requests:               make(chan Req),
+		responses:              make(chan Resp),
+		numSamples:             *numSamples,
+		numClients:             uint(*numClients),
+		objectSize:             *objectSize,
+		objectNamePrefix:       *objectNamePrefix,
+		bucketName:             *bucketName,
+		endpoints:              strings.Split(*endpoint, ","),
+		verbose:                *verbose,
+		putObjectRetention:     *putObjectRetention,
+		numPutObjectRetention:  *numPutObjectRetention,
+		tlsVerifyDisable:       *tlsVerifyDisable,
+		listObjects:            *listObjects,
+		listObjectsAfterWrites: *listObjectsAfterWrites,
 	}
 	fmt.Println(params)
 	fmt.Println()
@@ -230,6 +234,7 @@ func (params *Params) submitLoad(op string) {
 				Key:    key,
 				Body:   bytes.NewReader(bufferBytes),
 			}
+
 			if params.putObjectRetention {
 				retention := &s3.ObjectLockRetention{
 					Mode: aws.String("GOVERNANCE"),
@@ -247,6 +252,11 @@ func (params *Params) submitLoad(op string) {
 					}
 				}
 			}
+
+			if params.listObjects && i%params.listObjectsAfterWrites == 0 {
+				params.requests <- &s3.ListObjectsInput{Bucket: bucket}
+			}
+
 		} else if op == opRead {
 			params.requests <- &s3.GetObjectInput{
 				Bucket: bucket,
@@ -295,6 +305,10 @@ func (params *Params) startClient(cfg *aws.Config) {
 			if numBytes != params.objectSize {
 				err = fmt.Errorf("expected object length %d, actual %d", params.objectSize, numBytes)
 			}
+		case *s3.ListObjectsInput:
+			req, _ := svc.ListObjectsRequest(r)
+			err = req.Send()
+			excludeStatistic = true
 		default:
 			panic("Developer error")
 		}
@@ -305,19 +319,21 @@ func (params *Params) startClient(cfg *aws.Config) {
 
 // Specifies the parameters for a given test
 type Params struct {
-	operation             string
-	requests              chan Req
-	responses             chan Resp
-	numSamples            int
-	numClients            uint
-	objectSize            int64
-	objectNamePrefix      string
-	bucketName            string
-	endpoints             []string
-	verbose               bool
-	putObjectRetention    bool
-	numPutObjectRetention int
-	tlsVerifyDisable      bool
+	operation              string
+	requests               chan Req
+	responses              chan Resp
+	numSamples             int
+	numClients             uint
+	objectSize             int64
+	objectNamePrefix       string
+	bucketName             string
+	endpoints              []string
+	verbose                bool
+	putObjectRetention     bool
+	numPutObjectRetention  int
+	tlsVerifyDisable       bool
+	listObjects            bool
+	listObjectsAfterWrites int
 }
 
 func (params Params) String() string {
