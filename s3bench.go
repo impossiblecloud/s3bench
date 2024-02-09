@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
-	"crypto/rand"
+	"crypto/tls"
 	"encoding/csv"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -42,6 +44,10 @@ func main() {
 	numSamples := flag.Int("numSamples", 200, "total number of requests to send")
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
+	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
+	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
+	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
+	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
 
 	flag.Parse()
 
@@ -58,15 +64,18 @@ func main() {
 
 	// Setup and print summary of the accepted parameters
 	params := Params{
-		requests:         make(chan Req),
-		responses:        make(chan Resp),
-		numSamples:       *numSamples,
-		numClients:       uint(*numClients),
-		objectSize:       *objectSize,
-		objectNamePrefix: *objectNamePrefix,
-		bucketName:       *bucketName,
-		endpoints:        strings.Split(*endpoint, ","),
-		verbose:          *verbose,
+		requests:              make(chan Req),
+		responses:             make(chan Resp),
+		numSamples:            *numSamples,
+		numClients:            uint(*numClients),
+		objectSize:            *objectSize,
+		objectNamePrefix:      *objectNamePrefix,
+		bucketName:            *bucketName,
+		endpoints:             strings.Split(*endpoint, ","),
+		verbose:               *verbose,
+		putObjectRetention:    *putObjectRetention,
+		numPutObjectRetention: *numPutObjectRetention,
+		tlsVerifyDisable:      *tlsVerifyDisable,
 	}
 	fmt.Println(params)
 	fmt.Println()
@@ -83,6 +92,10 @@ func main() {
 	fmt.Printf("Done (%s)\n", time.Since(timeGenData))
 	fmt.Println()
 
+	if *tlsVerifyDisable {
+		http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+
 	// Start the load clients and run a write test followed by a read test
 	cfg := &aws.Config{
 		Credentials:      credentials.NewStaticCredentials(*accessKey, *accessSecret, ""),
@@ -92,11 +105,20 @@ func main() {
 	params.StartClients(cfg)
 
 	fmt.Printf("Running %s test...\n", opWrite)
-	writeResult := params.Run(opWrite)
+	numSamplesWrite := params.numSamples
+	if params.putObjectRetention {
+		numSamplesWrite += params.numSamples * params.numPutObjectRetention
+	}
+	writeResult := params.Run(opWrite, numSamplesWrite)
 	fmt.Println()
 
-	fmt.Printf("Running %s test...\n", opRead)
-	readResult := params.Run(opRead)
+	var readResult Result
+	if *skipRead {
+		fmt.Printf("Running %s test skipped...\n", opRead)
+	} else {
+		fmt.Printf("Running %s test...\n", opRead)
+		readResult = params.Run(opRead, params.numSamples)
+	}
 	fmt.Println()
 
 	// Repeating the parameters of the test followed by the results
@@ -104,7 +126,11 @@ func main() {
 	fmt.Println()
 	fmt.Println(writeResult)
 	fmt.Println()
-	fmt.Println(readResult)
+	if *skipRead {
+		fmt.Println("Read test skipped...")
+	} else {
+		fmt.Println(readResult)
+	}
 
 	if *csvOutput {
 		err := outputToCSV([]Result{writeResult, readResult}, "output.csv")
@@ -152,16 +178,24 @@ func main() {
 	}
 }
 
-func (params *Params) Run(op string) Result {
+func (params *Params) Run(op string, numSamples int) Result {
 	startTime := time.Now()
 
 	// Start submitting load requests
 	go params.submitLoad(op)
 
+	excludeTime := time.Duration(0)
+
 	// Collect and aggregate stats for completed requests
-	result := Result{opDurations: make([]float64, 0, params.numSamples), operation: op}
-	for i := 0; i < params.numSamples; i++ {
+	result := Result{opDurations: make([]float64, 0, numSamples), operation: op}
+	for i := 0; i < numSamples; i++ {
 		resp := <-params.responses
+
+		if resp.excludeStatistic {
+			excludeTime += resp.duration
+			continue
+		}
+
 		errorString := ""
 		if resp.err != nil {
 			result.numErrors++
@@ -179,6 +213,8 @@ func (params *Params) Run(op string) Result {
 	}
 
 	result.totalDuration = time.Since(startTime)
+	// exclude retention time, it affects on throughput
+	result.totalDuration = result.totalDuration - excludeTime
 	sort.Float64s(result.opDurations)
 	return result
 }
@@ -193,6 +229,23 @@ func (params *Params) submitLoad(op string) {
 				Bucket: bucket,
 				Key:    key,
 				Body:   bytes.NewReader(bufferBytes),
+			}
+			if params.putObjectRetention {
+				retention := &s3.ObjectLockRetention{
+					Mode: aws.String("GOVERNANCE"),
+					RetainUntilDate: aws.Time(
+						time.Now().AddDate(rand.Intn(10), rand.Intn(12), rand.Intn(30)),
+					),
+				}
+				for j := 0; j < params.numPutObjectRetention; j++ {
+					randomPreviousKey := aws.String(fmt.Sprintf("%s%d", params.objectNamePrefix, rand.Intn(i+1)))
+					params.requests <- &s3.PutObjectRetentionInput{
+						Bucket:                    bucket,
+						Key:                       randomPreviousKey,
+						Retention:                 retention,
+						BypassGovernanceRetention: aws.Bool(true),
+					}
+				}
 			}
 		} else if op == opRead {
 			params.requests <- &s3.GetObjectInput{
@@ -221,12 +274,17 @@ func (params *Params) startClient(cfg *aws.Config) {
 		var err error
 		numBytes := params.objectSize
 
+		var excludeStatistic bool
 		switch r := request.(type) {
 		case *s3.PutObjectInput:
 			req, _ := svc.PutObjectRequest(r)
 			// Disable payload checksum calculation (very expensive)
 			req.HTTPRequest.Header.Add("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD")
 			err = req.Send()
+		case *s3.PutObjectRetentionInput:
+			req, _ := svc.PutObjectRetentionRequest(r)
+			err = req.Send()
+			excludeStatistic = true
 		case *s3.GetObjectInput:
 			req, resp := svc.GetObjectRequest(r)
 			err = req.Send()
@@ -241,22 +299,25 @@ func (params *Params) startClient(cfg *aws.Config) {
 			panic("Developer error")
 		}
 
-		params.responses <- Resp{err, time.Since(putStartTime), numBytes}
+		params.responses <- Resp{err, time.Since(putStartTime), numBytes, excludeStatistic}
 	}
 }
 
 // Specifies the parameters for a given test
 type Params struct {
-	operation        string
-	requests         chan Req
-	responses        chan Resp
-	numSamples       int
-	numClients       uint
-	objectSize       int64
-	objectNamePrefix string
-	bucketName       string
-	endpoints        []string
-	verbose          bool
+	operation             string
+	requests              chan Req
+	responses             chan Resp
+	numSamples            int
+	numClients            uint
+	objectSize            int64
+	objectNamePrefix      string
+	bucketName            string
+	endpoints             []string
+	verbose               bool
+	putObjectRetention    bool
+	numPutObjectRetention int
+	tlsVerifyDisable      bool
 }
 
 func (params Params) String() string {
@@ -365,7 +426,8 @@ func outputToCSV(results []Result, filename string) error {
 type Req interface{}
 
 type Resp struct {
-	err      error
-	duration time.Duration
-	numBytes int64
+	err              error
+	duration         time.Duration
+	numBytes         int64
+	excludeStatistic bool
 }
