@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -43,6 +44,7 @@ func main() {
 	numClients := flag.Int("numClients", 40, "number of concurrent clients")
 	numSamples := flag.Int("numSamples", 200, "total number of requests to send")
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
+	skipWrite := flag.Bool("skipWrite", false, "skip write operation benchmarks")
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
 	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
 	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
@@ -80,6 +82,7 @@ func main() {
 		tlsVerifyDisable:       *tlsVerifyDisable,
 		listObjects:            *listObjects,
 		listObjectsAfterWrites: *listObjectsAfterWrites,
+		skipWrite:              *skipWrite,
 	}
 	fmt.Println(params)
 	fmt.Println()
@@ -108,10 +111,20 @@ func main() {
 	}
 	params.StartClients(cfg)
 
-	fmt.Printf("Running %s test...\n", opWrite)
+	if *skipWrite {
+		fmt.Printf("Running %s test skipped...\n", opWrite)
+	} else {
+		fmt.Printf("Running %s test...\n", opWrite)
+	}
 	numSamplesWrite := params.numSamples
 	if params.putObjectRetention {
 		numSamplesWrite += params.numSamples * params.numPutObjectRetention
+	}
+	if params.listObjects {
+		numSamplesWrite += int(math.Min(float64(params.numSamples%params.listObjectsAfterWrites), 1))
+	}
+	if params.skipWrite {
+		numSamplesWrite -= params.numSamples
 	}
 	writeResult := params.Run(opWrite, numSamplesWrite)
 	fmt.Println()
@@ -128,7 +141,11 @@ func main() {
 	// Repeating the parameters of the test followed by the results
 	fmt.Println(params)
 	fmt.Println()
-	fmt.Println(writeResult)
+	if *skipWrite {
+		fmt.Println("Write test skipped...")
+	} else {
+		fmt.Println(writeResult)
+	}
 	fmt.Println()
 	if *skipRead {
 		fmt.Println("Read test skipped...")
@@ -229,10 +246,12 @@ func (params *Params) submitLoad(op string) {
 	for i := 0; i < params.numSamples; i++ {
 		key := aws.String(fmt.Sprintf("%s%d", params.objectNamePrefix, i))
 		if op == opWrite {
-			params.requests <- &s3.PutObjectInput{
-				Bucket: bucket,
-				Key:    key,
-				Body:   bytes.NewReader(bufferBytes),
+			if !params.skipWrite {
+				params.requests <- &s3.PutObjectInput{
+					Bucket: bucket,
+					Key:    key,
+					Body:   bytes.NewReader(bufferBytes),
+				}
 			}
 
 			if params.putObjectRetention {
@@ -334,6 +353,7 @@ type Params struct {
 	tlsVerifyDisable       bool
 	listObjects            bool
 	listObjectsAfterWrites int
+	skipWrite              bool
 }
 
 func (params Params) String() string {
