@@ -46,7 +46,7 @@ func main() {
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	skipWrite := flag.Bool("skipWrite", false, "skip write operation benchmarks")
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
-	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
+	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with 1 second in the future after each PutObject one")
 	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
 	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
@@ -258,7 +258,7 @@ func (params *Params) submitLoad(op string) {
 				retention := &s3.ObjectLockRetention{
 					Mode: aws.String("GOVERNANCE"),
 					RetainUntilDate: aws.Time(
-						time.Now().AddDate(rand.Intn(10), rand.Intn(12), rand.Intn(30)),
+						time.Now().Add(time.Second * 1),
 					),
 				}
 				for j := 0; j < params.numPutObjectRetention; j++ {
