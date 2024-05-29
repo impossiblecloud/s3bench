@@ -34,6 +34,7 @@ var bufferBytes []byte
 
 func main() {
 	csvOutput := flag.Bool("csvOutput", false, "enable output to CSV file")
+	csvOutputFile := flag.String("csvOutputFile", "output.csv", "csv output file name")
 	endpoint := flag.String("endpoint", "", "S3 endpoint(s) comma separated - http://IP:PORT,http://IP:PORT")
 	region := flag.String("region", "igneous-test", "AWS region to use, eg: us-west-1|us-east-1, etc")
 	accessKey := flag.String("accessKey", "", "the S3 access key")
@@ -154,12 +155,12 @@ func main() {
 	}
 
 	if *csvOutput {
-		err := outputToCSV([]Result{writeResult, readResult}, "output.csv")
+		err := outputToCSV([]Result{writeResult, readResult}, *csvOutputFile)
 		if err != nil {
 			fmt.Printf("Error writing to CSV: %s\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Results written to output.csv")
+		fmt.Println("Results written to file")
 	}
 
 	// Do cleanup if required
