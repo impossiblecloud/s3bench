@@ -34,6 +34,7 @@ var bufferBytes []byte
 
 func main() {
 	csvOutput := flag.Bool("csvOutput", false, "enable output to CSV file")
+	csvOutputFile := flag.String("csvOutputFile", "output.csv", "csv output file name")
 	endpoint := flag.String("endpoint", "", "S3 endpoint(s) comma separated - http://IP:PORT,http://IP:PORT")
 	region := flag.String("region", "igneous-test", "AWS region to use, eg: us-west-1|us-east-1, etc")
 	accessKey := flag.String("accessKey", "", "the S3 access key")
@@ -46,7 +47,7 @@ func main() {
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	skipWrite := flag.Bool("skipWrite", false, "skip write operation benchmarks")
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
-	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with random date value for random object after each PutObject one")
+	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with 1 second in the future after each PutObject one")
 	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
 	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
@@ -154,12 +155,12 @@ func main() {
 	}
 
 	if *csvOutput {
-		err := outputToCSV([]Result{writeResult, readResult}, "output.csv")
+		err := outputToCSV([]Result{writeResult, readResult}, *csvOutputFile)
 		if err != nil {
 			fmt.Printf("Error writing to CSV: %s\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("Results written to output.csv")
+		fmt.Println("Results written to file")
 	}
 
 	// Do cleanup if required
@@ -258,7 +259,7 @@ func (params *Params) submitLoad(op string) {
 				retention := &s3.ObjectLockRetention{
 					Mode: aws.String("GOVERNANCE"),
 					RetainUntilDate: aws.Time(
-						time.Now().AddDate(rand.Intn(10), rand.Intn(12), rand.Intn(30)),
+						time.Now().Add(time.Second * 1),
 					),
 				}
 				for j := 0; j < params.numPutObjectRetention; j++ {
