@@ -11,7 +11,7 @@ uses the AWS Go SDK.
 
 Build for regular amd64 arches (linux):
 ```bash
-GOOS=linux GOARCH=amd64 go build .
+GOOS=linux GOARCH=amd64 go build -o s3bench .
 ```
 
 ## Installation
