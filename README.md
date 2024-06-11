@@ -7,6 +7,13 @@ uses the AWS Go SDK.
 ## Requirements
 * Go
 
+## Build
+
+Build for regular amd64 arches (linux):
+```bash
+GOOS=linux GOARCH=amd64 go build .
+```
+
 ## Installation
 Run the following command to build the binary.
 

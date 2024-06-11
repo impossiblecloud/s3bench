@@ -24,8 +24,9 @@ import (
 )
 
 const (
-	opRead  = "Read"
-	opWrite = "Write"
+	opRead               = "Read"
+	opWrite              = "Write"
+	opPutObjectRetention = "PutObjectRetention"
 	//max that can be deleted at a time via DeleteObjects()
 	commitSize = 1000
 )
@@ -46,10 +47,9 @@ func main() {
 	numSamples := flag.Int("numSamples", 200, "total number of requests to send")
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	skipWrite := flag.Bool("skipWrite", false, "skip write operation benchmarks")
-	verbose := flag.Bool("verbose", false, "print verbose per thread status")
-	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with 1 second in the future after each PutObject one")
-	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
+	skipPutObjectRetention := flag.Bool("PutObjectRetention", true, "skip PutObjectRetention operation benchmarks (default: true)")
+	verbose := flag.Bool("verbose", false, "print verbose per thread status")
 	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
 	listObjects := flag.Bool("listObjects", false, "enable ListObjects requests for first page with default settings")
 	listObjectsAfterWrites := flag.Int("listObjectsAfterWrites", 10, "execute ListObjects after number object write requests")
@@ -78,8 +78,6 @@ func main() {
 		bucketName:             *bucketName,
 		endpoints:              strings.Split(*endpoint, ","),
 		verbose:                *verbose,
-		putObjectRetention:     *putObjectRetention,
-		numPutObjectRetention:  *numPutObjectRetention,
 		tlsVerifyDisable:       *tlsVerifyDisable,
 		listObjects:            *listObjects,
 		listObjectsAfterWrites: *listObjectsAfterWrites,
@@ -112,15 +110,13 @@ func main() {
 	}
 	params.StartClients(cfg)
 
+	// write operation
 	if *skipWrite {
 		fmt.Printf("Running %s test skipped...\n", opWrite)
 	} else {
 		fmt.Printf("Running %s test...\n", opWrite)
 	}
 	numSamplesWrite := params.numSamples
-	if params.putObjectRetention {
-		numSamplesWrite += params.numSamples * params.numPutObjectRetention
-	}
 	if params.listObjects {
 		numSamplesWrite += int(math.Min(float64(params.numSamples%params.listObjectsAfterWrites), 1))
 	}
@@ -130,12 +126,23 @@ func main() {
 	writeResult := params.Run(opWrite, numSamplesWrite)
 	fmt.Println()
 
+	// read operation
 	var readResult Result
 	if *skipRead {
 		fmt.Printf("Running %s test skipped...\n", opRead)
 	} else {
 		fmt.Printf("Running %s test...\n", opRead)
 		readResult = params.Run(opRead, params.numSamples)
+	}
+	fmt.Println()
+
+	// put-object-retention operation
+	var putObjectRetentionResult Result
+	if *skipPutObjectRetention {
+		fmt.Printf("Running %s test skipped...\n", opPutObjectRetention)
+	} else {
+		fmt.Printf("Running %s test...\n", opPutObjectRetention)
+		putObjectRetentionResult = params.Run(opPutObjectRetention, params.numSamples)
 	}
 	fmt.Println()
 
@@ -153,9 +160,15 @@ func main() {
 	} else {
 		fmt.Println(readResult)
 	}
+	fmt.Println()
+	if *skipPutObjectRetention {
+		fmt.Println("Put-object-retention test skipped...")
+	} else {
+		fmt.Println(putObjectRetentionResult)
+	}
 
 	if *csvOutput {
-		err := outputToCSV([]Result{writeResult, readResult}, *csvOutputFile)
+		err := outputToCSV([]Result{writeResult, readResult, putObjectRetentionResult}, *csvOutputFile)
 		if err != nil {
 			fmt.Printf("Error writing to CSV: %s\n", err)
 			os.Exit(1)
@@ -255,26 +268,27 @@ func (params *Params) submitLoad(op string) {
 				}
 			}
 
-			if params.putObjectRetention {
-				retention := &s3.ObjectLockRetention{
-					Mode: aws.String("GOVERNANCE"),
-					RetainUntilDate: aws.Time(
-						time.Now().Add(time.Second * 1),
-					),
-				}
-				for j := 0; j < params.numPutObjectRetention; j++ {
-					randomPreviousKey := aws.String(fmt.Sprintf("%s%d", params.objectNamePrefix, rand.Intn(i+1)))
-					params.requests <- &s3.PutObjectRetentionInput{
-						Bucket:                    bucket,
-						Key:                       randomPreviousKey,
-						Retention:                 retention,
-						BypassGovernanceRetention: aws.Bool(true),
-					}
-				}
-			}
-
 			if params.listObjects && i%params.listObjectsAfterWrites == 0 {
 				params.requests <- &s3.ListObjectsInput{Bucket: bucket}
+			}
+
+			// put object retention
+			// -> Iteratre over all existing samples and put a 1sec retention on it
+		} else if params.putObjectRetention {
+			// create retention object with 1 sec retention
+			retention := &s3.ObjectLockRetention{
+				Mode: aws.String("GOVERNANCE"),
+				RetainUntilDate: aws.Time(
+					time.Now().Add(time.Second * 1),
+				),
+			}
+
+			// create putobjectretention request with above config and send to client queue
+			params.requests <- &s3.PutObjectRetentionInput{
+				Bucket:                    bucket,
+				Key:                       key,
+				Retention:                 retention,
+				BypassGovernanceRetention: aws.Bool(true),
 			}
 
 		} else if op == opRead {
