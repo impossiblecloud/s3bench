@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log/slog"
 	"math"
 	"math/rand"
 	"net/http"
@@ -48,7 +49,7 @@ func main() {
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	skipWrite := flag.Bool("skipWrite", false, "skip write operation benchmarks")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
-	skipPutObjectRetention := flag.Bool("PutObjectRetention", true, "skip PutObjectRetention operation benchmarks (default: true)")
+	skipPutObjectRetention := flag.Bool("skipPutObjectRetention", true, "skip PutObjectRetention operation benchmarks (default: true)")
 	verbose := flag.Bool("verbose", false, "print verbose per thread status")
 	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
 	listObjects := flag.Bool("listObjects", false, "enable ListObjects requests for first page with default settings")
@@ -149,26 +150,31 @@ func main() {
 	// Repeating the parameters of the test followed by the results
 	fmt.Println(params)
 	fmt.Println()
+
+	var results []Result
 	if *skipWrite {
 		fmt.Println("Write test skipped...")
 	} else {
 		fmt.Println(writeResult)
+		results = append(results, writeResult)
 	}
 	fmt.Println()
 	if *skipRead {
 		fmt.Println("Read test skipped...")
 	} else {
 		fmt.Println(readResult)
+		results = append(results, readResult)
 	}
 	fmt.Println()
 	if *skipPutObjectRetention {
 		fmt.Println("Put-object-retention test skipped...")
 	} else {
 		fmt.Println(putObjectRetentionResult)
+		results = append(results, putObjectRetentionResult)
 	}
 
-	if *csvOutput {
-		err := outputToCSV([]Result{writeResult, readResult, putObjectRetentionResult}, *csvOutputFile)
+	if *csvOutput && len(results) > 0 {
+		err := outputToCSV(results, *csvOutputFile)
 		if err != nil {
 			fmt.Printf("Error writing to CSV: %s\n", err)
 			os.Exit(1)
@@ -274,15 +280,14 @@ func (params *Params) submitLoad(op string) {
 
 			// put object retention
 			// -> Iteratre over all existing samples and put a 1sec retention on it
-		} else if params.putObjectRetention {
+		} else if op == opPutObjectRetention {
 			// create retention object with 1 sec retention
 			retention := &s3.ObjectLockRetention{
 				Mode: aws.String("GOVERNANCE"),
 				RetainUntilDate: aws.Time(
-					time.Now().Add(time.Second * 1),
+					time.Now().Add(time.Second * 2),
 				),
 			}
-
 			// create putobjectretention request with above config and send to client queue
 			params.requests <- &s3.PutObjectRetentionInput{
 				Bucket:                    bucket,
@@ -328,7 +333,7 @@ func (params *Params) startClient(cfg *aws.Config) {
 		case *s3.PutObjectRetentionInput:
 			req, _ := svc.PutObjectRetentionRequest(r)
 			err = req.Send()
-			excludeStatistic = true
+			excludeStatistic = false
 		case *s3.GetObjectInput:
 			req, resp := svc.GetObjectRequest(r)
 			err = req.Send()
@@ -353,7 +358,6 @@ func (params *Params) startClient(cfg *aws.Config) {
 
 // Specifies the parameters for a given test
 type Params struct {
-	operation              string
 	requests               chan Req
 	responses              chan Resp
 	numSamples             int
@@ -363,23 +367,25 @@ type Params struct {
 	bucketName             string
 	endpoints              []string
 	verbose                bool
-	putObjectRetention     bool
-	numPutObjectRetention  int
 	tlsVerifyDisable       bool
 	listObjects            bool
 	listObjectsAfterWrites int
 	skipWrite              bool
+	skipRead               bool
+	skipPutObjectRetention bool
 }
 
 func (params Params) String() string {
 	output := fmt.Sprintln("Test parameters")
-	output += fmt.Sprintf("endpoint(s):      %s\n", params.endpoints)
-	output += fmt.Sprintf("bucket:           %s\n", params.bucketName)
-	output += fmt.Sprintf("objectNamePrefix: %s\n", params.objectNamePrefix)
-	output += fmt.Sprintf("objectSize:       %0.4f MB\n", float64(params.objectSize)/(1024*1024))
-	output += fmt.Sprintf("numClients:       %d\n", params.numClients)
-	output += fmt.Sprintf("numSamples:       %d\n", params.numSamples)
-	output += fmt.Sprintf("verbose:       %d\n", params.verbose)
+	output += fmt.Sprintf("endpoint(s):      		%s\n", params.endpoints)
+	output += fmt.Sprintf("bucket:           		%s\n", params.bucketName)
+	output += fmt.Sprintf("objectNamePrefix: 		%s\n", params.objectNamePrefix)
+	output += fmt.Sprintf("objectSize:       		%0.4f MB\n", float64(params.objectSize)/(1024*1024))
+	output += fmt.Sprintf("numClients:       		%d\n", params.numClients)
+	output += fmt.Sprintf("numSamples:       		%d\n", params.numSamples)
+	output += fmt.Sprintf("skipWrite:       	 	%t\n", params.skipWrite)
+	output += fmt.Sprintf("skipRead:       	 		%t\n", params.skipRead)
+	output += fmt.Sprintf("skipPutObjectRetention:  %t\n", params.skipPutObjectRetention)
 	return output
 }
 
@@ -394,10 +400,17 @@ type Result struct {
 
 func (r Result) String() string {
 	report := fmt.Sprintf("Results Summary for %s Operation(s)\n", r.operation)
-	report += fmt.Sprintf("Total Transferred: %0.3f MB\n", float64(r.bytesTransmitted)/(1024*1024))
-	report += fmt.Sprintf("Total Throughput:  %0.2f MB/s\n", (float64(r.bytesTransmitted)/(1024*1024))/r.totalDuration.Seconds())
+	// don't print throughput metrics for metadata operations
+	if r.operation != opPutObjectRetention {
+		report += fmt.Sprintf("Total Transferred: %0.3f MB\n", float64(r.bytesTransmitted)/(1024*1024))
+		report += fmt.Sprintf("Total Throughput:  %0.2f MB/s\n", (float64(r.bytesTransmitted)/(1024*1024))/r.totalDuration.Seconds())
+	}
 	report += fmt.Sprintf("Total Duration:    %0.3f s\n", r.totalDuration.Seconds())
 	report += fmt.Sprintf("Number of Errors:  %d\n", r.numErrors)
+
+	// slog.Info("Operation durations", "opDurations", r.opDurations)
+	// slog.Info("Length of operation durations", "len(opDurations)", len(r.opDurations))
+
 	if len(r.opDurations) > 0 {
 		report += fmt.Sprintln("------------------------------------")
 		report += fmt.Sprintf("%s times Max:       %0.3f s\n", r.operation, r.percentile(100))
@@ -451,6 +464,8 @@ func outputToCSV(results []Result, filename string) error {
 
 	// Write data
 	for _, result := range results {
+		slog.Info("Result", "result.operation", result.operation)
+		slog.Info("Result", "result.opDurations", result.opDurations)
 		record := []string{
 			result.operation,
 			fmt.Sprintf("%0.3f", float64(result.bytesTransmitted)/(1024*1024)),
