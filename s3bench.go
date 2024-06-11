@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math"
 	"math/rand"
 	"net/http"
 	"os"
@@ -24,8 +23,10 @@ import (
 )
 
 const (
-	opRead  = "Read"
-	opWrite = "Write"
+	opRead               = "Read"
+	opWrite              = "Write"
+	opPutObjectRetention = "PutObjectRetention"
+	opHead               = "Head"
 	//max that can be deleted at a time via DeleteObjects()
 	commitSize = 1000
 )
@@ -46,13 +47,12 @@ func main() {
 	numSamples := flag.Int("numSamples", 200, "total number of requests to send")
 	skipCleanup := flag.Bool("skipCleanup", false, "skip deleting objects created by this tool at the end of the run")
 	skipWrite := flag.Bool("skipWrite", false, "skip write operation benchmarks")
-	verbose := flag.Bool("verbose", false, "print verbose per thread status")
-	putObjectRetention := flag.Bool("putObjectRetention", false, "enable PutObjectRetention requests (GOVERNANCE) with 1 second in the future after each PutObject one")
-	numPutObjectRetention := flag.Int("numPutObjectRetention", 1, "number of PutObjectRetention requests")
 	skipRead := flag.Bool("skipRead", false, "skip read operation benchmarks")
+	skipPutObjectRetention := flag.Bool("skipPutObjectRetention", true, "skip PutObjectRetention operation benchmarks (default: true)")
+	skipHead := flag.Bool("skipHead", true, "skip skipHead operation benchmarks (default: true)")
+	//metaOpMultiplier := flag.Int("metaOpMultiplier", 1, "multiplier of metadata operations: e.g. if set to 10, this metadata operations will be exectued 10 times on the same object")
+	verbose := flag.Bool("verbose", false, "print verbose per thread status")
 	tlsVerifyDisable := flag.Bool("tlsVerifyDisable", false, "disable TLS verify")
-	listObjects := flag.Bool("listObjects", false, "enable ListObjects requests for first page with default settings")
-	listObjectsAfterWrites := flag.Int("listObjectsAfterWrites", 10, "execute ListObjects after number object write requests")
 
 	flag.Parse()
 
@@ -69,21 +69,18 @@ func main() {
 
 	// Setup and print summary of the accepted parameters
 	params := Params{
-		requests:               make(chan Req),
-		responses:              make(chan Resp),
-		numSamples:             *numSamples,
-		numClients:             uint(*numClients),
-		objectSize:             *objectSize,
-		objectNamePrefix:       *objectNamePrefix,
-		bucketName:             *bucketName,
-		endpoints:              strings.Split(*endpoint, ","),
-		verbose:                *verbose,
-		putObjectRetention:     *putObjectRetention,
-		numPutObjectRetention:  *numPutObjectRetention,
-		tlsVerifyDisable:       *tlsVerifyDisable,
-		listObjects:            *listObjects,
-		listObjectsAfterWrites: *listObjectsAfterWrites,
-		skipWrite:              *skipWrite,
+		requests:         make(chan Req),
+		responses:        make(chan Resp),
+		numSamples:       *numSamples,
+		numClients:       uint(*numClients),
+		objectSize:       *objectSize,
+		objectNamePrefix: *objectNamePrefix,
+		bucketName:       *bucketName,
+		endpoints:        strings.Split(*endpoint, ","),
+		verbose:          *verbose,
+		tlsVerifyDisable: *tlsVerifyDisable,
+		skipWrite:        *skipWrite,
+		//metaOpMultiplier: *metaOpMultiplier,
 	}
 	fmt.Println(params)
 	fmt.Println()
@@ -112,24 +109,20 @@ func main() {
 	}
 	params.StartClients(cfg)
 
+	// write operation
 	if *skipWrite {
 		fmt.Printf("Running %s test skipped...\n", opWrite)
 	} else {
 		fmt.Printf("Running %s test...\n", opWrite)
 	}
 	numSamplesWrite := params.numSamples
-	if params.putObjectRetention {
-		numSamplesWrite += params.numSamples * params.numPutObjectRetention
-	}
-	if params.listObjects {
-		numSamplesWrite += int(math.Min(float64(params.numSamples%params.listObjectsAfterWrites), 1))
-	}
 	if params.skipWrite {
 		numSamplesWrite -= params.numSamples
 	}
 	writeResult := params.Run(opWrite, numSamplesWrite)
 	fmt.Println()
 
+	// read operation
 	var readResult Result
 	if *skipRead {
 		fmt.Printf("Running %s test skipped...\n", opRead)
@@ -139,23 +132,61 @@ func main() {
 	}
 	fmt.Println()
 
+	// put-object-retention operation
+	var putObjectRetentionResult Result
+	if *skipPutObjectRetention {
+		fmt.Printf("Running %s test skipped...\n", opPutObjectRetention)
+	} else {
+		fmt.Printf("Running %s test...\n", opPutObjectRetention)
+		putObjectRetentionResult = params.Run(opPutObjectRetention, params.numSamples)
+	}
+	fmt.Println()
+
+	// head operation
+	var headResult Result
+	if *skipHead {
+		fmt.Printf("Running %s test skipped...\n", opHead)
+	} else {
+		fmt.Printf("Running %s test...\n", opHead)
+		headResult = params.Run(opHead, params.numSamples)
+	}
+	fmt.Println()
+
 	// Repeating the parameters of the test followed by the results
 	fmt.Println(params)
 	fmt.Println()
+
+	var results []Result
 	if *skipWrite {
 		fmt.Println("Write test skipped...")
 	} else {
 		fmt.Println(writeResult)
+		results = append(results, writeResult)
 	}
 	fmt.Println()
 	if *skipRead {
 		fmt.Println("Read test skipped...")
 	} else {
 		fmt.Println(readResult)
+		results = append(results, readResult)
+	}
+	fmt.Println()
+	if *skipPutObjectRetention {
+		fmt.Println("Put-object-retention test skipped...")
+	} else {
+		fmt.Println(putObjectRetentionResult)
+		results = append(results, putObjectRetentionResult)
+	}
+	fmt.Println()
+	if *skipHead {
+		fmt.Println("Head test skipped...")
+	} else {
+		fmt.Println(headResult)
+		results = append(results, headResult)
 	}
 
-	if *csvOutput {
-		err := outputToCSV([]Result{writeResult, readResult}, *csvOutputFile)
+	if *csvOutput && len(results) > 0 {
+		err := outputToCSV(results, *csvOutputFile)
 		if err != nil {
 			fmt.Printf("Error writing to CSV: %s\n", err)
 			os.Exit(1)
@@ -227,10 +258,17 @@ func (params *Params) Run(op string, numSamples int) Result {
 			result.opDurations = append(result.opDurations, resp.duration.Seconds())
 		}
 		if params.verbose {
-			fmt.Printf("%v operation completed in %0.2fs (%d/%d) - %0.2fMB/s%s\n",
-				op, resp.duration.Seconds(), i+1, params.numSamples,
-				(float64(result.bytesTransmitted)/(1024*1024))/time.Since(startTime).Seconds(),
-				errorString)
+			if result.operation != opPutObjectRetention && result.operation != opHead {
+				fmt.Printf("%v operation completed in %0.2fs (%d/%d) - %0.2fMB/s%s\n",
+					op, resp.duration.Seconds(), i+1, params.numSamples,
+					(float64(result.bytesTransmitted)/(1024*1024))/time.Since(startTime).Seconds(),
+					errorString)
+			} else {
+				fmt.Printf("%v operation completed in %0.2fs (%d/%d)%s\n",
+					op, resp.duration.Seconds(), i+1, params.numSamples,
+					errorString)
+			}
+
 		}
 	}
 
@@ -255,30 +293,31 @@ func (params *Params) submitLoad(op string) {
 				}
 			}
 
-			if params.putObjectRetention {
-				retention := &s3.ObjectLockRetention{
-					Mode: aws.String("GOVERNANCE"),
-					RetainUntilDate: aws.Time(
-						time.Now().Add(time.Second * 1),
-					),
-				}
-				for j := 0; j < params.numPutObjectRetention; j++ {
-					randomPreviousKey := aws.String(fmt.Sprintf("%s%d", params.objectNamePrefix, rand.Intn(i+1)))
-					params.requests <- &s3.PutObjectRetentionInput{
-						Bucket:                    bucket,
-						Key:                       randomPreviousKey,
-						Retention:                 retention,
-						BypassGovernanceRetention: aws.Bool(true),
-					}
-				}
+			// put object retention
+			// -> Iteratre over all existing samples and put a 1sec retention on it
+		} else if op == opPutObjectRetention {
+			// create retention object with 1 sec retention
+			retention := &s3.ObjectLockRetention{
+				Mode: aws.String("GOVERNANCE"),
+				RetainUntilDate: aws.Time(
+					time.Now().Add(time.Second * 2),
+				),
 			}
-
-			if params.listObjects && i%params.listObjectsAfterWrites == 0 {
-				params.requests <- &s3.ListObjectsInput{Bucket: bucket}
+			// create putobjectretention request with above config and send to client queue
+			params.requests <- &s3.PutObjectRetentionInput{
+				Bucket:                    bucket,
+				Key:                       key,
+				Retention:                 retention,
+				BypassGovernanceRetention: aws.Bool(true),
 			}
 
 		} else if op == opRead {
 			params.requests <- &s3.GetObjectInput{
+				Bucket: bucket,
+				Key:    key,
+			}
+		} else if op == opHead {
+			params.requests <- &s3.HeadObjectInput{
 				Bucket: bucket,
 				Key:    key,
 			}
@@ -314,7 +353,11 @@ func (params *Params) startClient(cfg *aws.Config) {
 		case *s3.PutObjectRetentionInput:
 			req, _ := svc.PutObjectRetentionRequest(r)
 			err = req.Send()
-			excludeStatistic = true
+			excludeStatistic = false
+		case *s3.HeadObjectInput:
+			req, _ := svc.HeadObjectRequest(r)
+			err = req.Send()
+			excludeStatistic = false
 		case *s3.GetObjectInput:
 			req, resp := svc.GetObjectRequest(r)
 			err = req.Send()
@@ -325,10 +368,6 @@ func (params *Params) startClient(cfg *aws.Config) {
 			if numBytes != params.objectSize {
 				err = fmt.Errorf("expected object length %d, actual %d", params.objectSize, numBytes)
 			}
-		case *s3.ListObjectsInput:
-			req, _ := svc.ListObjectsRequest(r)
-			err = req.Send()
-			excludeStatistic = true
 		default:
 			panic("Developer error")
 		}
@@ -339,7 +378,6 @@ func (params *Params) startClient(cfg *aws.Config) {
 
 // Specifies the parameters for a given test
 type Params struct {
-	operation              string
 	requests               chan Req
 	responses              chan Resp
 	numSamples             int
@@ -349,23 +387,27 @@ type Params struct {
 	bucketName             string
 	endpoints              []string
 	verbose                bool
-	putObjectRetention     bool
-	numPutObjectRetention  int
 	tlsVerifyDisable       bool
-	listObjects            bool
-	listObjectsAfterWrites int
 	skipWrite              bool
+	skipRead               bool
+	skipPutObjectRetention bool
+	skipHead               bool
+	//metaOpMultiplier       int
 }
 
 func (params Params) String() string {
 	output := fmt.Sprintln("Test parameters")
-	output += fmt.Sprintf("endpoint(s):      %s\n", params.endpoints)
-	output += fmt.Sprintf("bucket:           %s\n", params.bucketName)
-	output += fmt.Sprintf("objectNamePrefix: %s\n", params.objectNamePrefix)
-	output += fmt.Sprintf("objectSize:       %0.4f MB\n", float64(params.objectSize)/(1024*1024))
-	output += fmt.Sprintf("numClients:       %d\n", params.numClients)
-	output += fmt.Sprintf("numSamples:       %d\n", params.numSamples)
-	output += fmt.Sprintf("verbose:       %d\n", params.verbose)
+	output += fmt.Sprintf("endpoint(s):      		%s\n", params.endpoints)
+	output += fmt.Sprintf("bucket:           		%s\n", params.bucketName)
+	output += fmt.Sprintf("objectNamePrefix: 		%s\n", params.objectNamePrefix)
+	output += fmt.Sprintf("objectSize:       		%0.4f MB\n", float64(params.objectSize)/(1024*1024))
+	output += fmt.Sprintf("numClients:       		%d\n", params.numClients)
+	output += fmt.Sprintf("numSamples:       		%d\n", params.numSamples)
+	output += fmt.Sprintf("skipWrite:       	 	%t\n", params.skipWrite)
+	output += fmt.Sprintf("skipRead:       	 	%t\n", params.skipRead)
+	output += fmt.Sprintf("skipPutObjectRetention:       	 %t\n", params.skipPutObjectRetention)
+	output += fmt.Sprintf("skipHead:       	 	%t\n", params.skipHead)
+	//output += fmt.Sprintf("metaOpMultiplier:       	%t\n", params.metaOpMultiplier)
 	return output
 }
 
@@ -380,10 +422,17 @@ type Result struct {
 
 func (r Result) String() string {
 	report := fmt.Sprintf("Results Summary for %s Operation(s)\n", r.operation)
-	report += fmt.Sprintf("Total Transferred: %0.3f MB\n", float64(r.bytesTransmitted)/(1024*1024))
-	report += fmt.Sprintf("Total Throughput:  %0.2f MB/s\n", (float64(r.bytesTransmitted)/(1024*1024))/r.totalDuration.Seconds())
+	// don't print throughput metrics for metadata operations
+	if r.operation != opPutObjectRetention && r.operation != opHead {
+		report += fmt.Sprintf("Total Transferred: %0.3f MB\n", float64(r.bytesTransmitted)/(1024*1024))
+		report += fmt.Sprintf("Total Throughput:  %0.2f MB/s\n", (float64(r.bytesTransmitted)/(1024*1024))/r.totalDuration.Seconds())
+	}
 	report += fmt.Sprintf("Total Duration:    %0.3f s\n", r.totalDuration.Seconds())
 	report += fmt.Sprintf("Number of Errors:  %d\n", r.numErrors)
+
+	// slog.Info("Operation durations", "opDurations", r.opDurations)
+	// slog.Info("Length of operation durations", "len(opDurations)", len(r.opDurations))
+
 	if len(r.opDurations) > 0 {
 		report += fmt.Sprintln("------------------------------------")
 		report += fmt.Sprintf("%s times Max:       %0.3f s\n", r.operation, r.percentile(100))
@@ -437,6 +486,8 @@ func outputToCSV(results []Result, filename string) error {
 
 	// Write data
 	for _, result := range results {
+		// slog.Info("Result", "result.operation", result.operation)
+		// slog.Info("Result", "result.opDurations", result.opDurations)
 		record := []string{
 			result.operation,
 			fmt.Sprintf("%0.3f", float64(result.bytesTransmitted)/(1024*1024)),
